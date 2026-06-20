@@ -7,7 +7,7 @@
     "pi-package"
   ],
   "license": "MIT",
-  "author": "",
+  "author": "dvictor357",
   "pi": {
     "extensions": [
       "./extensions"

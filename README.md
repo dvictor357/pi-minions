@@ -21,7 +21,13 @@ pi install git:github.com/dvictor357/pi-minions
 
 ## Agent Definition
 
-Agents are `.md` files with YAML frontmatter:
+Agents are `.md` files with YAML frontmatter. **8 agents ship with the package** (Scout, Worker, Reviewer, Verifier, Planner, Lead, QA, Quick-Worker) and are auto-discovered. Define your own in user or project directories — they override bundled agents with the same name.
+
+### Discovery order (last wins)
+
+1. **Bundled** — shipped with pi-minions (`extensions/subagent/agents/`)
+2. **User** — `~/.pi/agent/agents/*.md`
+3. **Project** — `.pi/agents/*.md` (nearest to cwd)
 
 ```markdown
 ---
@@ -36,6 +42,7 @@ You are a fast reconnaissance agent. Find files quickly. Be concise.
 
 | Location | Scope |
 |---|---|
+| `extensions/subagent/agents/*.md` | Bundled with package |
 | `~/.pi/agent/agents/*.md` | Global (all projects) |
 | `.pi/agents/*.md` | Project-local |
 

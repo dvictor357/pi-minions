@@ -4,6 +4,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 export type AgentScope = "user" | "project" | "both";
@@ -25,13 +26,24 @@ export interface AgentConfig {
 	 *  `model`/`thinking` here still wins over the tier. */
 	tier?: string;
 	systemPrompt: string;
-	source: "user" | "project";
+	source: "user" | "project" | "bundled";
 	filePath: string;
 }
 
 export interface AgentDiscoveryResult {
 	agents: AgentConfig[];
 	projectAgentsDir: string | null;
+	bundledAgentsDir: string | null;
+}
+
+/** Resolve the bundled agents directory shipped with this extension. */
+function getBundledAgentsDir(): string | null {
+	try {
+		const dir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "agents");
+		return fs.existsSync(dir) ? dir : null;
+	} catch {
+		return null;
+	}
 }
 
 function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
@@ -117,11 +129,16 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
 	const userDir = path.join(getAgentDir(), "agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
+	const bundledAgentsDir = getBundledAgentsDir();
 
 	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
 	const projectAgents = scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
+	const bundledAgents = bundledAgentsDir ? loadAgentsFromDir(bundledAgentsDir, "bundled") : [];
 
 	const agentMap = new Map<string, AgentConfig>();
+
+	// Bundled agents are the base — user/project agents override by name
+	for (const agent of bundledAgents) agentMap.set(agent.name, agent);
 
 	if (scope === "both") {
 		for (const agent of userAgents) agentMap.set(agent.name, agent);
@@ -132,7 +149,7 @@ export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryRe
 		for (const agent of projectAgents) agentMap.set(agent.name, agent);
 	}
 
-	return { agents: Array.from(agentMap.values()), projectAgentsDir };
+	return { agents: Array.from(agentMap.values()), projectAgentsDir, bundledAgentsDir };
 }
 
 export function formatAgentList(agents: AgentConfig[], maxItems: number): { text: string; remaining: number } {
