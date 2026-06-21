@@ -12,11 +12,11 @@ pi install git:github.com/dvictor357/pi-minions
 
 ## Modes
 
-| Mode | Description |
-|---|---|
-| **Single** | One agent, one task. `{ agent, task }` |
-| **Parallel** | Multiple agents run concurrently (max 4). `{ tasks: [...] }` |
-| **Chain** | Sequential steps. Each step sees the previous output via `{previous}`. `{ chain: [...] }` |
+| Mode         | Description                                                                                                                      |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| **Single**   | One agent, one task. `{ agent, task }`                                                                                           |
+| **Parallel** | Multiple agents run concurrently (max 4). `{ tasks: [...] }`                                                                     |
+| **Chain**    | Sequential steps. Each step sees the previous output via `{previous}`. `{ chain: [...] }`                                        |
 | **Pipeline** | Items flow through stages independently — item B can be in stage 1 while item A is in stage 3. `{ items: [...], stages: [...] }` |
 
 ## Agent Definition
@@ -40,22 +40,22 @@ tier: fast
 You are a fast reconnaissance agent. Find files quickly. Be concise.
 ```
 
-| Location | Scope |
-|---|---|
-| `extensions/subagent/agents/*.md` | Bundled with package |
-| `~/.pi/agent/agents/*.md` | Global (all projects) |
-| `.pi/agents/*.md` | Project-local |
+| Location                          | Scope                 |
+| --------------------------------- | --------------------- |
+| `extensions/subagent/agents/*.md` | Bundled with package  |
+| `~/.pi/agent/agents/*.md`         | Global (all projects) |
+| `.pi/agents/*.md`                 | Project-local         |
 
 ### Frontmatter fields
 
-| Field | Description |
-|---|---|
-| `name` | Unique agent name |
-| `description` | LLM-readable — Main Agent uses this to decide when to summon |
-| `tools` | Comma-separated tool list (e.g. `read,ls,find,bash`) |
-| `model` | Explicit model override |
-| `thinking` | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
-| `tier` | Tier name (`fast`, `reasoning`) — resolves to model via settings |
+| Field         | Description                                                        |
+| ------------- | ------------------------------------------------------------------ |
+| `name`        | Unique agent name                                                  |
+| `description` | LLM-readable — Main Agent uses this to decide when to summon       |
+| `tools`       | Comma-separated tool list (e.g. `read,ls,find,bash`)               |
+| `model`       | Explicit model override                                            |
+| `thinking`    | Thinking level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `tier`        | Tier name (`fast`, `reasoning`) — resolves to model via settings   |
 
 ### Tier routing
 
