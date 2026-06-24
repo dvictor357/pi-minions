@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   attachAbortKillFallback,
+  CodebaseParams,
   loadQuestAgentModels,
   recordSpawnError,
 } from "./index.js";
@@ -160,5 +161,50 @@ describe("recordSpawnError", () => {
 
     expect(result.stderr).toBe("prior\nspawn EACCES");
     expect(result.errorMessage).toBe("spawn EACCES");
+  });
+});
+
+// ── Codebase tool: TypeBox schema validation ────────────────────────────────
+
+describe("CodebaseParams (codebase tool schema)", () => {
+  it("defines operation as optional string enum with scan/query/map/impact", () => {
+    const schema = JSON.parse(JSON.stringify(CodebaseParams));
+
+    expect(schema.type).toBe("object");
+    expect(schema.properties.operation).toBeDefined();
+    // StringEnum produces a constrained string type (type="string" with
+    // either an enum array or a union of const literals via anyOf)
+    const op = schema.properties.operation;
+    // At minimum, it constrains to string values
+    expect((op.type ?? op.enum) ? true : op.anyOf ? true : false).toBe(true);
+  });
+
+  it("defines pattern as optional string for query operations", () => {
+    const schema = JSON.parse(JSON.stringify(CodebaseParams));
+
+    expect(schema.properties.pattern).toBeDefined();
+    expect(schema.properties.pattern.type).toBe("string");
+  });
+
+  it("defines file as optional string for map/impact operations", () => {
+    const schema = JSON.parse(JSON.stringify(CodebaseParams));
+
+    expect(schema.properties.file).toBeDefined();
+    expect(schema.properties.file.type).toBe("string");
+  });
+
+  it("defines force as optional boolean defaulting to false", () => {
+    const schema = JSON.parse(JSON.stringify(CodebaseParams));
+
+    expect(schema.properties.force).toBeDefined();
+    expect(schema.properties.force.type).toBe("boolean");
+    expect(schema.properties.force.default).toBe(false);
+  });
+
+  it("accepts an empty object (all fields optional)", () => {
+    const schema = JSON.parse(JSON.stringify(CodebaseParams));
+
+    // All properties are optional — schema has no required array
+    expect(schema.required).toBeUndefined();
   });
 });

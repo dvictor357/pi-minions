@@ -19,9 +19,46 @@ pi install git:github.com/dvictor357/pi-minions
 | **Chain**    | Sequential steps. Each step sees the previous output via `{previous}`. `{ chain: [...] }`                                        |
 | **Pipeline** | Items flow through stages independently — item B can be in stage 1 while item A is in stage 3. `{ items: [...], stages: [...] }` |
 
+## Codebase Intelligence
+
+A built-in `codebase` tool scans your repo, builds a dependency graph, and answers architecture questions. No native dependencies — regex parsers, Node built-ins, and a JSON sidecar cache.
+
+### Operations
+
+| Operation  | Description                                                                                                                 |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------- |
+| **scan**   | Index all JS/TS source files (imports, exports, symbols, hashes). Writes `.pi/codebase-index.json`. Auto-runs on first use. |
+| **query**  | Find files by pattern — matches paths, file names, symbols, and exports (case-insensitive).                                 |
+| **map**    | Show a file's immediate dependencies and reverse dependencies with import/export details.                                   |
+| **impact** | Transitive reverse dependency closure — every file that depends on a given file, directly or transitively.                  |
+
+### Cache
+
+The index is cached to `.pi/codebase-index.json` and auto-refreshes when files change (mtime + SHA-256 hash of first 16 KiB). Force a re-scan with `force: true`.
+
+### Bundled Agent
+
+`codebase-analyst` (`tier: reasoning`) reads `.pi/codebase-index.json` directly to answer architecture, dependency, and refactoring-impact questions.
+
+### pi-suite Integration
+
+pi-suite's quest orchestration consumes the same `.pi/codebase-index.json` for pre-flight checks and post-task impact verification. No code dependencies — the contract is the JSON schema and `contractVersion` field.
+
+**Ownership split:**
+
+| Layer                           | Owner      | Role                                                                                         |
+| ------------------------------- | ---------- | -------------------------------------------------------------------------------------------- |
+| **Scanner** (`indexer.ts`)      | pi-minions | Walk repo, parse imports/exports/symbols, build dep/revDep maps                              |
+| **Cache** (`cache.ts`)          | pi-minions | Read/write `.pi/codebase-index.json`, staleness detection                                    |
+| **Query engine** (`query.ts`)   | pi-minions | `scanIndex`, `queryFiles`, `depMap`, `getImpact` — pure functions on `IndexData`             |
+| **`codebase` tool**             | pi-minions | Tool registration, params, results, and TUI rendering                                        |
+| **Quest planning/verification** | pi-suite   | Reads `.pi/codebase-index.json` directly for pre-flight checks and post-task impact analysis |
+
+pi-suite never imports pi-minions code. The integration contract is the JSON schema and `contractVersion` field in the sidecar cache. See [`CONTRACT.md`](extensions/subagent/codebase/CONTRACT.md) for the full specification including cache location, schema, tool params/results, staleness rules, and limitations.
+
 ## Agent Definition
 
-Agents are `.md` files with YAML frontmatter. **8 agents ship with the package** (Scout, Worker, Reviewer, Verifier, Planner, Lead, QA, Quick-Worker) and are auto-discovered. Define your own in user or project directories — they override bundled agents with the same name.
+Agents are `.md` files with YAML frontmatter. **9 agents ship with the package** (Scout, Worker, Reviewer, Verifier, Planner, Lead, QA, Quick-Worker, Codebase Analyst) and are auto-discovered. Define your own in user or project directories — they override bundled agents with the same name.
 
 ### Discovery order (last wins)
 
