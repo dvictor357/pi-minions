@@ -77,6 +77,21 @@ Map tiers to models in `~/.pi/agent/settings.json`:
 
 Change models in one place — all agents using that tier update automatically.
 
+### Model precedence
+
+When resolving which model an agent runs with:
+
+1. **Explicit `model:`** in the agent's frontmatter
+2. **pi-quest role model** — a per-role model the user approved inside a [pi-suite](https://github.com/dvictor357/pi-suite) quest (`quest_assign_model`), read from the shared project memory at `~/.pi/agent/memory/projects/<cwdHash>.json`
+3. **Tier mapping** in `settings.json`
+4. **Unset** — the spawned `pi` inherits its own default
+
+## Works with pi-suite / pi-quest
+
+pi-minions is the `subagent` tool that [pi-suite](https://github.com/dvictor357/pi-suite)'s **pi-quest** orchestrator expects. Quest never registers its own `subagent` tool — its planning and verification steps call `subagent(agent="scout")`, `subagent(agent="planner")`, `subagent(agent="verifier")`, etc. The bundled agents (`scout`, `planner`, `worker`, `quick-worker`, `reviewer`, `verifier`) cover every role quest's built-in teams reference, so the two install side-by-side with no setup.
+
+Per-role models a user approves in a quest are honored here too — see **Model precedence** above. The lookup is read-only and contract-versioned: with no pi-suite installed (or no quest run), the file is simply absent and pi-minions falls back to tier routing.
+
 ## License
 
 MIT

@@ -13,6 +13,7 @@
  */
 
 import { spawn } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -369,18 +370,85 @@ function readSubagentSettings(): SubagentSettings {
   return {};
 }
 
+// ── pi-suite cross-extension contract (project memory) ──────────────────────
+// pi-quest records user-approved per-role model choices on the shared
+// project-memory file at ~/.pi/agent/memory/projects/<cwdHash>.json under the
+// `agentModels` key. We read that file so an agent run through this `subagent`
+// tool honors the same model the user approved inside a quest — instead of
+// diverging onto the tier map. The hash algorithm and shape below MUST match
+// pi-suite's core/hash.ts and core/contract.ts.
+const MEMORY_PROJECTS_DIR = path.join(
+  os.homedir(),
+  ".pi",
+  "agent",
+  "memory",
+  "projects",
+);
+// The contract version this code understands. A file stamped higher may use a
+// shape we'd misread, so we ignore its agentModels rather than trust it.
+const QUEST_CONTRACT_VERSION = 1;
+
+/** Stable per-project key — must match pi-suite's cwdHash exactly. */
+function cwdHash(cwd: string): string {
+  return crypto.createHash("sha256").update(cwd).digest("hex").slice(0, 16);
+}
+
+interface AgentModelChoice {
+  model: string;
+  provider?: string;
+  reason?: string;
+  timestamp?: number;
+}
+
 /**
- * Resolve an agent's concrete model + thinking level. Precedence:
- *   explicit frontmatter (model:/thinking:) > tier mapping in settings.json > unset.
+ * Read pi-quest's per-role model approvals (the `agentModels` map) from the
+ * shared project-memory file. Keyed by sub-agent role/name. Returns an empty
+ * map when the file is absent, unreadable, or written by a newer contract than
+ * this code understands — so a standalone install (no pi-suite) is unaffected.
+ */
+export function loadQuestAgentModels(
+  cwd: string,
+): Record<string, AgentModelChoice> {
+  try {
+    const file = path.join(MEMORY_PROJECTS_DIR, `${cwdHash(cwd)}.json`);
+    const raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (
+      raw &&
+      typeof raw.contractVersion === "number" &&
+      raw.contractVersion > QUEST_CONTRACT_VERSION
+    ) {
+      return {};
+    }
+    const models = raw?.agentModels;
+    return models && typeof models === "object"
+      ? (models as Record<string, AgentModelChoice>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Resolve an agent's concrete model + thinking level. Model precedence:
+ *   explicit frontmatter (model:) > pi-quest's project-approved role model
+ *   (agentModels) > tier mapping in settings.json > unset.
+ * Thinking precedence: explicit frontmatter (thinking:) > tier mapping > unset.
  * "Unset" means we pass no flag and the spawned pi inherits its own defaults.
  */
-function resolveAgentRuntime(agent: AgentConfig): {
+function resolveAgentRuntime(
+  agent: AgentConfig,
+  cwd: string,
+): {
   model?: string;
   thinking?: string;
 } {
   const cfg = readSubagentSettings();
   const tier = agent.tier;
-  const model = agent.model ?? (tier ? cfg.models?.[tier] : undefined);
+  const questModel = loadQuestAgentModels(cwd)[agent.name]?.model?.trim();
+  const model =
+    agent.model ??
+    (questModel || undefined) ??
+    (tier ? cfg.models?.[tier] : undefined);
   let thinking = agent.thinking ?? (tier ? cfg.thinking?.[tier] : undefined);
   if (thinking && !THINKING_LEVELS.has(thinking)) thinking = undefined; // ignore an invalid settings value
   return { model, thinking };
@@ -424,7 +492,7 @@ async function runSingleAgent(
   // Resolve model + thinking from the agent's tier (settings.json) or explicit
   // frontmatter. Without --thinking, subagents inherit the global
   // defaultThinkingLevel (often xhigh) — wasteful for recon/mechanical agents.
-  const runtime = resolveAgentRuntime(agent);
+  const runtime = resolveAgentRuntime(agent, defaultCwd);
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   if (runtime.model) args.push("--model", runtime.model);
   if (runtime.thinking) args.push("--thinking", runtime.thinking);
@@ -1625,17 +1693,33 @@ export default function (pi: ExtensionAPI) {
           );
         }
       }
+      const questModels = loadQuestAgentModels(ctx.cwd);
+      if (Object.keys(questModels).length > 0) {
+        lines.push(
+          "",
+          "pi-quest role models (project memory, win over tiers):",
+        );
+        for (const [role, c] of Object.entries(questModels)) {
+          lines.push(
+            `  ${role} → ${c.model}${c.provider ? ` · ${c.provider}` : ""}`,
+          );
+        }
+      }
       lines.push("", "Agents → resolved:");
       const { agents } = discoverAgents(ctx.cwd, "both");
       for (const a of [...agents].sort((x, y) =>
         x.name.localeCompare(y.name),
       )) {
-        const r = resolveAgentRuntime(a);
-        const via = a.tier
-          ? `[${a.tier}]`
-          : a.model
-            ? "[explicit]"
-            : "[default]";
+        const r = resolveAgentRuntime(a, ctx.cwd);
+        // Label must mirror resolveAgentRuntime precedence:
+        // explicit > quest > tier > default.
+        const via = a.model
+          ? "[explicit]"
+          : questModels[a.name]?.model
+            ? "[quest]"
+            : a.tier
+              ? `[${a.tier}]`
+              : "[default]";
         lines.push(
           `  ${a.name} ${via} → ${r.model ?? "(pi default)"}${r.thinking ? ` · think:${r.thinking}` : ""}`,
         );
