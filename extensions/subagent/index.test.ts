@@ -4,7 +4,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { attachAbortKillFallback, loadQuestAgentModels } from "./index.js";
+import {
+  attachAbortKillFallback,
+  loadQuestAgentModels,
+  recordSpawnError,
+} from "./index.js";
 
 class FakeProcess extends EventEmitter {
   readonly signals: NodeJS.Signals[] = [];
@@ -129,5 +133,32 @@ describe("loadQuestAgentModels (pi-suite contract bridge)", () => {
   it("returns {} when agentModels is absent or malformed", () => {
     writeMemory({ name: "demo", agentModels: "not-an-object" });
     expect(loadQuestAgentModels(cwd)).toEqual({});
+  });
+});
+
+describe("recordSpawnError", () => {
+  it("appends err.message to stderr and sets errorMessage", () => {
+    const result: { stderr: string; errorMessage?: string } = {
+      stderr: "existing stderr\n",
+      errorMessage: undefined,
+    };
+    const err = new Error("ENOENT: no such file or directory");
+
+    recordSpawnError(err, result);
+
+    expect(result.stderr).toBe(
+      "existing stderr\nENOENT: no such file or directory",
+    );
+    expect(result.errorMessage).toBe("ENOENT: no such file or directory");
+  });
+
+  it("appends to stderr without replacing prior content", () => {
+    const result: { stderr: string; errorMessage?: string } = {
+      stderr: "prior\n",
+    };
+    recordSpawnError(new Error("spawn EACCES"), result);
+
+    expect(result.stderr).toBe("prior\nspawn EACCES");
+    expect(result.errorMessage).toBe("spawn EACCES");
   });
 });

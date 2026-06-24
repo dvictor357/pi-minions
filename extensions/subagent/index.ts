@@ -336,6 +336,18 @@ export function attachAbortKillFallback(
   else signal.addEventListener("abort", killProc, { once: true });
 }
 
+/**
+ * Record a spawn error on a result object. Exported so the error-preservation
+ * path is independently testable without mocking the full `runSingleAgent` flow.
+ */
+export function recordSpawnError(
+  err: Error,
+  result: { stderr: string; errorMessage?: string },
+): void {
+  result.stderr += err.message;
+  result.errorMessage = err.message;
+}
+
 const THINKING_LEVELS = new Set([
   "off",
   "minimal",
@@ -610,7 +622,8 @@ async function runSingleAgent(
         resolve(code ?? 0);
       });
 
-      proc.on("error", () => {
+      proc.on("error", (err) => {
+        recordSpawnError(err, currentResult);
         resolve(1);
       });
 

@@ -8,6 +8,11 @@
   ],
   "license": "MIT",
   "author": "dvictor357",
+  "files": [
+    "extensions/",
+    "package.json",
+    "README.md"
+  ],
   "pi": {
     "extensions": [
       "./extensions"
@@ -18,7 +23,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "verify": "npm run typecheck && npm run format:check && npm run test"
   },
   "engines": {
     "node": ">=20"

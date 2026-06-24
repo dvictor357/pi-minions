@@ -1,4 +1,5 @@
 node_modules/
 .pi/
+.claude/
 *.log
 .DS_Store
