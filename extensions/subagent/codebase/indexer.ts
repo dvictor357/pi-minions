@@ -249,7 +249,7 @@ function parseExports(content: string): ExportEntry[] {
   return exports;
 }
 
-function parseSymbols(content: string): SymbolEntry[] {
+function parseSymbols(content: string, ext: string): SymbolEntry[] {
   const symbols: SymbolEntry[] = [];
   const seen = new Set<string>();
 
@@ -277,28 +277,56 @@ function parseSymbols(content: string): SymbolEntry[] {
     addSymbol(name, kind);
   }
 
-  const genericPatterns: Array<[RegExp, SymbolEntry["kind"]]> = [
-    [/^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/gm, "function"],
-    [/^\s*class\s+([A-Za-z_]\w*)\b/gm, "class"],
-    [/^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)\b/gm, "function"],
-    [/^\s*(?:pub\s+)?(?:struct|trait|impl)\s+([A-Za-z_]\w*)\b/gm, "class"],
-    [/^\s*(?:pub\s+)?enum\s+([A-Za-z_]\w*)\b/gm, "enum"],
-    [/^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(/gm, "function"],
-    [/^\s*type\s+([A-Za-z_]\w*)\s+(?:struct|interface)\b/gm, "type"],
-    [
-      /^\s*(?:public|private|protected|internal|static|final|abstract|open|data|sealed|record|partial|async|override|virtual|inline|suspend|fun\s+)*\s*(?:class|interface|enum|struct|record)\s+([A-Za-z_]\w*)\b/gm,
-      "class",
-    ],
-    [
-      /^\s*(?:public|private|protected|internal|static|final|abstract|open|override|virtual|inline|suspend|async|fun\s+)*\s*(?:fun|function)\s+([A-Za-z_]\w*)\s*\(/gm,
+  const genericPatterns: Array<[RegExp, SymbolEntry["kind"]]> = [];
+
+  if ([".py", ".pyi"].includes(ext)) {
+    genericPatterns.push(
+      [/^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/gm, "function"],
+      [/^\s*class\s+([A-Za-z_]\w*)\b/gm, "class"],
+    );
+  }
+
+  if (ext === ".rs") {
+    genericPatterns.push(
+      [/^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)\b/gm, "function"],
+      [/^\s*(?:pub\s+)?(?:struct|trait|impl)\s+([A-Za-z_]\w*)\b/gm, "class"],
+      [/^\s*(?:pub\s+)?enum\s+([A-Za-z_]\w*)\b/gm, "enum"],
+    );
+  }
+
+  if (ext === ".go") {
+    genericPatterns.push(
+      [/^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(/gm, "function"],
+      [/^\s*type\s+([A-Za-z_]\w*)\s+(?:struct|interface)\b/gm, "type"],
+    );
+  }
+
+  if ([".java", ".kt", ".kts", ".swift", ".cs"].includes(ext)) {
+    genericPatterns.push(
+      [
+        /^\s*(?:public|private|protected|internal|static|final|abstract|open|data|sealed|record|partial|async|override|virtual|inline|suspend|fun\s+)*\s*(?:class|interface|enum|struct|record)\s+([A-Za-z_]\w*)\b/gm,
+        "class",
+      ],
+      [
+        /^\s*(?:public|private|protected|internal|static|final|abstract|open|override|virtual|inline|suspend|async|fun\s+)*\s*(?:fun|function)\s+([A-Za-z_]\w*)\s*\(/gm,
+        "function",
+      ],
+    );
+  }
+
+  if ([".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx"].includes(ext)) {
+    genericPatterns.push([
+      /^\s*(?:(?:public|private|protected|internal|static|final|abstract|override|virtual|async|inline|constexpr|consteval|func)\s+)*(?:[A-Za-z_$][\w$:<>,.?*&\[\] ]*\s+)+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:\{|=>)/gm,
       "function",
-    ],
-    [
-      /^\s*(?:(?:public|private|protected|internal|static|final|abstract|override|virtual|async|inline|constexpr|consteval|func)\s+)*(?:[A-Za-z_$][\w$:<>,.?*&\[\]\s]+\s+)+([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*(?:\{|=>)/gm,
+    ]);
+  }
+
+  if ([".lua"].includes(ext)) {
+    genericPatterns.push([
+      /^\s*(?:local\s+)?function\s+([A-Za-z_]\w*)\s*\(/gm,
       "function",
-    ],
-    [/^\s*(?:local\s+)?function\s+([A-Za-z_]\w*)\s*\(/gm, "function"],
-  ];
+    ]);
+  }
 
   for (const [pattern, kind] of genericPatterns) {
     for (const genericMatch of content.matchAll(pattern)) {
@@ -422,7 +450,7 @@ export function scanRepo(opts: ScanOptions = {}): IndexData {
         relativePath,
       ),
       exports: parseExports(content),
-      symbols: parseSymbols(content),
+      symbols: parseSymbols(content, path.extname(relativePath).toLowerCase()),
       mtime: stat.mtimeMs,
       hash: quickHash(content),
     };
