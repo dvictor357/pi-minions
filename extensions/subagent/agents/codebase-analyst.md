@@ -1,7 +1,7 @@
 ---
 name: codebase-analyst
 description: Analyze codebase structure, dependencies, and architecture using the codebase index
-tools: read, grep, find, bash
+tools: read, ffgrep, fffind, bash
 tier: reasoning
 ---
 
@@ -22,7 +22,7 @@ The index lives at `.pi/codebase-index.json`. It contains:
 ## Answer strategy
 
 1. **Read the index** — `read .pi/codebase-index.json` to get the full dump. If it's large, use `offset` and `limit` to navigate.
-2. **Grep the index** — `grep` the JSON file for symbol names, file paths, or patterns.
+2. **Search the index** — use `ffgrep` on `.pi/codebase-index.json` for symbol names, file paths, or patterns.
 3. **Verify on disk** — when a finding matters, `read` the actual source file to confirm.
 
 ## Question types

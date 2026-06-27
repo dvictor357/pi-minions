@@ -42,6 +42,8 @@ const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const MAX_PIPELINE_ITEMS = 16;
 const MAX_RETRIES = 3;
+const DEFAULT_AGENT_TIMEOUT_MS = 3 * 60 * 1000;
+const KILL_GRACE_MS = 5000;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
 
@@ -140,12 +142,22 @@ function formatToolCall(
         themeFg("dim", ` in ${shortenPath(rawPath)}`)
       );
     }
-    case "grep": {
+    case "grep":
+    case "ffgrep": {
       const pattern = (args.pattern || "") as string;
       const rawPath = (args.path || ".") as string;
       return (
-        themeFg("muted", "grep ") +
+        themeFg("muted", `${toolName} `) +
         themeFg("accent", `/${pattern}/`) +
+        themeFg("dim", ` in ${shortenPath(rawPath)}`)
+      );
+    }
+    case "fffind": {
+      const pattern = (args.pattern || "*") as string;
+      const rawPath = (args.path || ".") as string;
+      return (
+        themeFg("muted", "fffind ") +
+        themeFg("accent", pattern) +
         themeFg("dim", ` in ${shortenPath(rawPath)}`)
       );
     }
@@ -370,6 +382,7 @@ const SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "settings.json");
 interface SubagentSettings {
   models?: Record<string, string>;
   thinking?: Record<string, string>;
+  timeoutMs?: number;
 }
 
 /**
@@ -485,6 +498,7 @@ async function runSingleAgent(
   signal: AbortSignal | undefined,
   onUpdate: OnUpdateCallback | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
+  timeoutMs: number,
 ): Promise<SingleResult> {
   const agent = agents.find((a) => a.name === agentName);
 
@@ -573,9 +587,64 @@ async function runSingleAgent(
       const proc = spawn(invocation.command, invocation.args, {
         cwd: cwd ?? defaultCwd,
         shell: false,
+        detached: process.platform !== "win32",
         stdio: ["ignore", "pipe", "pipe"],
       });
       let buffer = "";
+      let closed = false;
+      let settled = false;
+      let terminating = false;
+      let forcedExitCode: number | null = null;
+      let killTimer: ReturnType<typeof setTimeout> | null = null;
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const clearTimers = () => {
+        if (killTimer) clearTimeout(killTimer);
+        if (timeoutTimer) clearTimeout(timeoutTimer);
+        killTimer = null;
+        timeoutTimer = null;
+      };
+
+      const finish = (code: number) => {
+        if (settled) return;
+        settled = true;
+        clearTimers();
+        resolve(code);
+      };
+
+      const killChild = (killSignal: NodeJS.Signals) => {
+        if (closed) return;
+        try {
+          if (process.platform !== "win32" && proc.pid) {
+            process.kill(-proc.pid, killSignal);
+          } else {
+            proc.kill(killSignal);
+          }
+        } catch {
+          try {
+            proc.kill(killSignal);
+          } catch {
+            /* ignore */
+          }
+        }
+      };
+
+      const terminate = (reason: string) => {
+        if (closed || settled || terminating) return;
+        terminating = true;
+        forcedExitCode = 1;
+        if (reason) {
+          currentResult.stderr += currentResult.stderr ? `\n${reason}` : reason;
+          currentResult.errorMessage = reason;
+        }
+        killChild("SIGTERM");
+        killTimer = setTimeout(() => {
+          killChild("SIGKILL");
+          // Do not let a wedged child keep the parent tool pending forever.
+          setTimeout(() => finish(1), 1000).unref?.();
+        }, KILL_GRACE_MS);
+        killTimer.unref?.();
+      };
 
       const processLine = (line: string) => {
         if (!line.trim()) return;
@@ -627,19 +696,37 @@ async function runSingleAgent(
       });
 
       proc.on("close", (code) => {
+        closed = true;
         if (buffer.trim()) processLine(buffer);
-        resolve(code ?? 0);
+        finish(code ?? forcedExitCode ?? 0);
       });
 
       proc.on("error", (err) => {
         recordSpawnError(err, currentResult);
-        resolve(1);
+        finish(1);
       });
 
+      if (timeoutMs > 0) {
+        timeoutTimer = setTimeout(() => {
+          terminate(`Subagent timed out after ${timeoutMs}ms`);
+        }, timeoutMs);
+        timeoutTimer.unref?.();
+      }
+
       if (signal) {
-        attachAbortKillFallback(proc, signal, () => {
+        if (signal.aborted) {
           wasAborted = true;
-        });
+          terminate("Subagent was aborted");
+        } else {
+          signal.addEventListener(
+            "abort",
+            () => {
+              wasAborted = true;
+              terminate("Subagent was aborted");
+            },
+            { once: true },
+          );
+        }
       }
     });
 
@@ -678,6 +765,7 @@ async function runAgentWithRetry(
   onUpdate: OnUpdateCallback | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
   retries: number,
+  timeoutMs: number,
 ): Promise<SingleResult> {
   let result = await runSingleAgent(
     defaultCwd,
@@ -689,6 +777,7 @@ async function runAgentWithRetry(
     signal,
     onUpdate,
     makeDetails,
+    timeoutMs,
   );
   let attempt = 0;
   while (
@@ -709,6 +798,7 @@ async function runAgentWithRetry(
       signal,
       onUpdate,
       makeDetails,
+      timeoutMs,
     );
   }
   return result;
@@ -784,6 +874,13 @@ const SubagentParams = Type.Object({
     Type.Number({
       description: `Retry a failed subagent up to N times (transient failures only). Default 0. Max ${MAX_RETRIES}.`,
       default: 0,
+    }),
+  ),
+  timeoutMs: Type.Optional(
+    Type.Number({
+      description:
+        "Maximum runtime per subagent attempt in milliseconds. Default comes from settings.json subagent.timeoutMs or 180000. Use 0 to disable.",
+      default: DEFAULT_AGENT_TIMEOUT_MS,
     }),
   ),
   onError: Type.Optional(
@@ -873,6 +970,11 @@ export default function (pi: ExtensionAPI) {
         0,
         Math.min(MAX_RETRIES, Math.floor(params.retries ?? 0)),
       );
+      const settings = readSubagentSettings();
+      const rawTimeoutMs = params.timeoutMs ?? settings.timeoutMs;
+      const timeoutMs = Number.isFinite(rawTimeoutMs)
+        ? Math.max(0, Math.floor(rawTimeoutMs as number))
+        : DEFAULT_AGENT_TIMEOUT_MS;
       const onError: "stop" | "continue" =
         params.onError === "continue" ? "continue" : "stop";
 
@@ -977,6 +1079,7 @@ export default function (pi: ExtensionAPI) {
             chainUpdate,
             makeDetails("chain"),
             retries,
+            timeoutMs,
           );
           results.push(result);
 
@@ -1085,6 +1188,7 @@ export default function (pi: ExtensionAPI) {
               },
               makeDetails("parallel"),
               retries,
+              timeoutMs,
             );
             allResults[index] = result;
             emitParallelUpdate();
@@ -1193,6 +1297,7 @@ export default function (pi: ExtensionAPI) {
                 },
                 makeDetails("pipeline"),
                 retries,
+                timeoutMs,
               );
               last = r;
               allResults[idx] = r;
@@ -1245,6 +1350,7 @@ export default function (pi: ExtensionAPI) {
           onUpdate,
           makeDetails("single"),
           retries,
+          timeoutMs,
         );
         const isError = isFailedResult(result);
         if (isError) {

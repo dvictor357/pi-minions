@@ -1,7 +1,7 @@
 ---
 name: scout
 description: Fast codebase recon that returns compressed context for handoff to other agents
-tools: read, grep, find, ls, bash
+tools: read, ffgrep, fffind, ls, bash
 tier: fast
 ---
 
@@ -21,7 +21,7 @@ Thoroughness (infer from task, default medium):
 
 Strategy:
 
-1. grep/find to locate relevant code
+1. Use `fffind` for path discovery and `ffgrep` for content search. Prefer bare identifiers and scoped paths. Never use raw recursive `find`/`grep -R`/`rg` in `bash` unless explicitly asked; if you must, exclude `node_modules`, `.git`, `.pi`, `.venv`, `venv`, `vendor`, `dist`, `build`, `coverage`, `.next`, `.cache`.
 2. Read key sections (not entire files)
 3. Identify types, interfaces, key functions
 4. Note dependencies between files
