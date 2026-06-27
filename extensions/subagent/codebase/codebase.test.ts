@@ -5,6 +5,7 @@
  * or depending on external state.
  */
 
+import * as childProcess from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -40,6 +41,18 @@ function writeFile(root: string, relativePath: string, content: string): void {
   const abs = path.join(root, relativePath);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
   fs.writeFileSync(abs, content, "utf8");
+}
+
+function initGitRepo(root: string): boolean {
+  try {
+    childProcess.execFileSync("git", ["init"], {
+      cwd: root,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 afterEach(() => {
@@ -380,15 +393,98 @@ describe("scanRepo (indexer)", () => {
     expect(index.fileCount).toBeLessThanOrEqual(3);
   });
 
-  it("ignores non-JS/TS files", () => {
+  it("scans Python source files", () => {
+    const root = makeTempDir();
+    writeFile(root, "api/main.py", "def app():\n    return True\n");
+    writeFile(root, "services/bot/worker.py", "class Worker:\n    pass\n");
+
+    const index = scanRepo({ rootDir: root });
+
+    expect(Object.keys(index.files)).toEqual([
+      "api/main.py",
+      "services/bot/worker.py",
+    ]);
+    expect(index.fileCount).toBe(2);
+  });
+
+  it("respects gitignore when discovering files", () => {
+    const root = makeTempDir();
+    if (!initGitRepo(root)) return;
+
+    writeFile(root, ".gitignore", ".venv\n");
+    writeFile(root, "api/main.py", "def app():\n    return True\n");
+    writeFile(root, ".venv/lib/python/site-packages/vendor.js", "var x = 1;");
+
+    const index = scanRepo({ rootDir: root });
+
+    expect(Object.keys(index.files)).toEqual(["api/main.py"]);
+  });
+
+  it("ignores non-source files", () => {
     const root = makeTempDir();
     writeFile(root, "src/main.ts", "export const x = 1;");
-    writeFile(root, "src/styles.css", ".foo { color: red; }");
+    writeFile(root, "assets/logo.png", "not really png");
     writeFile(root, "src/data.json", '{"a":1}');
 
     const index = scanRepo({ rootDir: root });
 
     expect(Object.keys(index.files)).toEqual(["src/main.ts"]);
+  });
+
+  it("indexes symbols across multiple programming languages", () => {
+    const root = makeTempDir();
+    writeFile(
+      root,
+      "cmd/server.go",
+      [
+        "package main",
+        "",
+        "func StartServer() {}",
+        "type Handler struct {}",
+      ].join("\n"),
+    );
+    writeFile(
+      root,
+      "src/lib.rs",
+      ["pub mod worker;", "pub fn run_job() {}", "pub struct Queue {}"].join(
+        "\n",
+      ),
+    );
+    writeFile(
+      root,
+      "app/Worker.java",
+      ["public class Worker {", "  public void process() {}", "}"].join("\n"),
+    );
+    writeFile(
+      root,
+      "api/main.py",
+      [
+        "from services.bot import worker",
+        "def create_app():",
+        "    return True",
+      ].join("\n"),
+    );
+
+    const index = scanRepo({ rootDir: root });
+
+    expect(Object.keys(index.files)).toEqual([
+      "api/main.py",
+      "app/Worker.java",
+      "cmd/server.go",
+      "src/lib.rs",
+    ]);
+    expect(index.files["cmd/server.go"].symbols).toContainEqual(
+      expect.objectContaining({ name: "StartServer", kind: "function" }),
+    );
+    expect(index.files["src/lib.rs"].symbols).toContainEqual(
+      expect.objectContaining({ name: "run_job", kind: "function" }),
+    );
+    expect(index.files["app/Worker.java"].symbols).toContainEqual(
+      expect.objectContaining({ name: "Worker", kind: "class" }),
+    );
+    expect(index.files["api/main.py"].symbols).toContainEqual(
+      expect.objectContaining({ name: "create_app", kind: "function" }),
+    );
   });
 
   it("leaves unresolved imports as empty resolved", () => {

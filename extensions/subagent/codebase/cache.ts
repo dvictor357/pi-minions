@@ -10,6 +10,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { discoverSourceFiles } from "./file-discovery.js";
 import { type IndexData, CODEBASE_CONTRACT_VERSION } from "./types.js";
 
 const CACHE_FILENAME = ".pi/codebase-index.json";
@@ -120,32 +121,16 @@ export function checkStaleness(
 
   // Build set of current source files on disk (quick, no content read yet)
   const onDisk = new Set<string>();
-  const stack: string[] = [rootDir];
-
-  while (stack.length > 0) {
-    const dir = stack.pop()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    for (const entry of entries) {
-      if (shouldExcludeQuick(entry.name, extraExcludes)) continue;
-
-      const fullPath = path.join(dir, entry.name);
-
-      if (entry.isDirectory()) {
-        stack.push(fullPath);
-      } else if (entry.isFile() && isSourceExt(entry.name)) {
-        const rel = path.posix.relative(
-          rootDir.replace(/\\/g, "/"),
-          fullPath.replace(/\\/g, "/"),
-        );
-        onDisk.add(rel);
-      }
-    }
+  for (const fullPath of discoverSourceFiles({
+    rootDir,
+    extraExcludes,
+    maxFiles: Number.MAX_SAFE_INTEGER,
+  })) {
+    const rel = path.posix.relative(
+      rootDir.replace(/\\/g, "/"),
+      fullPath.replace(/\\/g, "/"),
+    );
+    onDisk.add(rel);
   }
 
   // Files in cache but not on disk → deleted
@@ -200,54 +185,4 @@ export function checkStaleness(
     newFiles,
     deletedFiles,
   };
-}
-
-// ── Internals ───────────────────────────────────────────────────────────────
-
-const DEFAULT_EXCLUDES = [
-  "node_modules",
-  ".git",
-  ".pi",
-  "dist",
-  "build",
-  ".next",
-  ".nuxt",
-  ".cache",
-  "coverage",
-  "__pycache__",
-  ".turbo",
-  ".vercel",
-  ".output",
-  "*.min.js",
-  "*.min.mjs",
-  "*.min.cjs",
-  ".DS_Store",
-];
-
-function shouldExcludeQuick(name: string, extraExcludes: string[]): boolean {
-  const all = [...DEFAULT_EXCLUDES, ...extraExcludes];
-  return all.some((pattern) => {
-    if (pattern.includes("*")) {
-      const regex = new RegExp(
-        "^" + pattern.replace(/\./g, "\\.").replace(/\*/g, ".*") + "$",
-      );
-      return regex.test(name);
-    }
-    return name === pattern;
-  });
-}
-
-const SOURCE_EXTS = new Set([
-  ".ts",
-  ".tsx",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-  ".mts",
-  ".cts",
-]);
-
-function isSourceExt(name: string): boolean {
-  return SOURCE_EXTS.has(path.extname(name).toLowerCase());
 }
