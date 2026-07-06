@@ -117,10 +117,18 @@ describe("loadQuestAgentModels (pi-suite contract bridge)", () => {
 
   it("reads agentModels at the current contract version", () => {
     writeMemory({
-      contractVersion: 1,
+      contractVersion: 2,
       agentModels: { worker: { model: "claude-opus-4-8" } },
     });
     expect(loadQuestAgentModels(cwd).worker?.model).toBe("claude-opus-4-8");
+  });
+
+  it("reads agentModels from contract v1 (backward-compatible)", () => {
+    writeMemory({
+      contractVersion: 1,
+      agentModels: { planner: { model: "gpt-4", provider: "openai" } },
+    });
+    expect(loadQuestAgentModels(cwd).planner?.model).toBe("gpt-4");
   });
 
   it("ignores a file written by a newer contract (future-proofing)", () => {

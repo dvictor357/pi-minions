@@ -420,7 +420,7 @@ const MEMORY_PROJECTS_DIR = path.join(
 );
 // The contract version this code understands. A file stamped higher may use a
 // shape we'd misread, so we ignore its agentModels rather than trust it.
-const QUEST_CONTRACT_VERSION = 1;
+const QUEST_CONTRACT_VERSION = 2;
 
 /** Stable per-project key — must match pi-suite's cwdHash exactly. */
 function cwdHash(cwd: string): string {
