@@ -189,6 +189,7 @@ interface SingleResult {
   stderr: string;
   usage: UsageStats;
   model?: string;
+  thinking?: string;
   stopReason?: string;
   errorMessage?: string;
   step?: number;
@@ -369,14 +370,15 @@ export function recordSpawnError(
   result.errorMessage = err.message;
 }
 
-const THINKING_LEVELS = new Set([
+const THINKING_LEVEL_VALUES = [
   "off",
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
-]);
+] as const;
+const THINKING_LEVELS = new Set<string>(THINKING_LEVEL_VALUES);
 const SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "settings.json");
 
 interface SubagentSettings {
@@ -430,6 +432,7 @@ function cwdHash(cwd: string): string {
 interface AgentModelChoice {
   model: string;
   provider?: string;
+  thinkingLevel?: string;
   reason?: string;
   timestamp?: number;
 }
@@ -454,9 +457,33 @@ export function loadQuestAgentModels(
       return {};
     }
     const models = raw?.agentModels;
-    return models && typeof models === "object"
-      ? (models as Record<string, AgentModelChoice>)
-      : {};
+    if (!models || typeof models !== "object" || Array.isArray(models))
+      return {};
+
+    const choices: Record<string, AgentModelChoice> = {};
+    for (const [role, value] of Object.entries(models)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const choice = value as Record<string, unknown>;
+      const model = typeof choice.model === "string" ? choice.model.trim() : "";
+      if (!model) continue;
+      choices[role] = { model };
+      if (typeof choice.provider === "string")
+        choices[role].provider = choice.provider;
+      if (
+        typeof choice.thinkingLevel === "string" &&
+        THINKING_LEVELS.has(choice.thinkingLevel)
+      ) {
+        choices[role].thinkingLevel = choice.thinkingLevel;
+      }
+      if (typeof choice.reason === "string")
+        choices[role].reason = choice.reason;
+      if (
+        typeof choice.timestamp === "number" &&
+        Number.isFinite(choice.timestamp)
+      )
+        choices[role].timestamp = choice.timestamp;
+    }
+    return choices;
   } catch {
     return {};
   }
@@ -464,27 +491,39 @@ export function loadQuestAgentModels(
 
 /**
  * Resolve an agent's concrete model + thinking level. Model precedence:
- *   explicit frontmatter (model:) > pi-quest's project-approved role model
- *   (agentModels) > tier mapping in settings.json > unset.
- * Thinking precedence: explicit frontmatter (thinking:) > tier mapping > unset.
+ *   invocation override > explicit frontmatter (model:) > pi-quest's
+ *   project-approved role model (agentModels) > tier mapping > unset.
+ * Thinking precedence: invocation override > explicit frontmatter (thinking:)
+ *   > pi-quest's role thinking > tier mapping > unset.
  * "Unset" means we pass no flag and the spawned pi inherits its own defaults.
  */
-function resolveAgentRuntime(
+export function resolveAgentRuntime(
   agent: AgentConfig,
   cwd: string,
+  override: { model?: string; thinking?: string } = {},
 ): {
   model?: string;
   thinking?: string;
 } {
   const cfg = readSubagentSettings();
   const tier = agent.tier;
-  const questModel = loadQuestAgentModels(cwd)[agent.name]?.model?.trim();
+  const questChoice = loadQuestAgentModels(cwd)[agent.name];
+  const questModel = questChoice?.model?.trim();
   const model =
-    agent.model ??
-    (questModel || undefined) ??
+    override.model?.trim() ||
+    agent.model?.trim() ||
+    questModel ||
     (tier ? cfg.models?.[tier] : undefined);
-  let thinking = agent.thinking ?? (tier ? cfg.thinking?.[tier] : undefined);
-  if (thinking && !THINKING_LEVELS.has(thinking)) thinking = undefined; // ignore an invalid settings value
+  const thinking = [
+    override.thinking,
+    agent.thinking,
+    questChoice?.thinkingLevel,
+    tier ? cfg.thinking?.[tier] : undefined,
+  ]
+    .map((value) => value?.trim())
+    .find((value): value is string =>
+      Boolean(value && THINKING_LEVELS.has(value)),
+    );
   return { model, thinking };
 }
 
@@ -494,6 +533,7 @@ async function runSingleAgent(
   agentName: string,
   task: string,
   cwd: string | undefined,
+  runtimeOverride: { model?: string; thinking?: string } | undefined,
   step: number | undefined,
   signal: AbortSignal | undefined,
   onUpdate: OnUpdateCallback | undefined,
@@ -527,7 +567,7 @@ async function runSingleAgent(
   // Resolve model + thinking from the agent's tier (settings.json) or explicit
   // frontmatter. Without --thinking, subagents inherit the global
   // defaultThinkingLevel (often xhigh) — wasteful for recon/mechanical agents.
-  const runtime = resolveAgentRuntime(agent, defaultCwd);
+  const runtime = resolveAgentRuntime(agent, defaultCwd, runtimeOverride);
   const args: string[] = ["--mode", "json", "-p", "--no-session"];
   if (runtime.model) args.push("--model", runtime.model);
   if (runtime.thinking) args.push("--thinking", runtime.thinking);
@@ -554,6 +594,7 @@ async function runSingleAgent(
       turns: 0,
     },
     model: runtime.model,
+    thinking: runtime.thinking,
     step,
   };
 
@@ -760,6 +801,7 @@ async function runAgentWithRetry(
   agentName: string,
   task: string,
   cwd: string | undefined,
+  runtimeOverride: { model?: string; thinking?: string } | undefined,
   step: number | undefined,
   signal: AbortSignal | undefined,
   onUpdate: OnUpdateCallback | undefined,
@@ -773,6 +815,7 @@ async function runAgentWithRetry(
     agentName,
     task,
     cwd,
+    runtimeOverride,
     step,
     signal,
     onUpdate,
@@ -794,6 +837,7 @@ async function runAgentWithRetry(
       agentName,
       task,
       cwd,
+      runtimeOverride,
       step,
       signal,
       onUpdate,
@@ -807,6 +851,14 @@ async function runAgentWithRetry(
 const TaskItem = Type.Object({
   agent: Type.String({ description: "Name of the agent to invoke" }),
   task: Type.String({ description: "Task to delegate to the agent" }),
+  model: Type.Optional(
+    Type.String({ description: "Model override for this invocation" }),
+  ),
+  thinking: Type.Optional(
+    StringEnum(THINKING_LEVEL_VALUES, {
+      description: "Thinking override for this invocation",
+    }),
+  ),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for the agent process" }),
   ),
@@ -818,6 +870,14 @@ const PipelineStage = Type.Object({
     description:
       "Stage instruction. {item} = the current item; {previous} = prior stage's output for this item.",
   }),
+  model: Type.Optional(
+    Type.String({ description: "Model override for this stage" }),
+  ),
+  thinking: Type.Optional(
+    StringEnum(THINKING_LEVEL_VALUES, {
+      description: "Thinking override for this stage",
+    }),
+  ),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for the agent process" }),
   ),
@@ -828,6 +888,14 @@ const ChainItem = Type.Object({
   task: Type.String({
     description: "Task with optional {previous} placeholder for prior output",
   }),
+  model: Type.Optional(
+    Type.String({ description: "Model override for this step" }),
+  ),
+  thinking: Type.Optional(
+    StringEnum(THINKING_LEVEL_VALUES, {
+      description: "Thinking override for this step",
+    }),
+  ),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for the agent process" }),
   ),
@@ -839,7 +907,7 @@ const AgentScopeSchema = StringEnum(["user", "project", "both"] as const, {
   default: "user",
 });
 
-const SubagentParams = Type.Object({
+export const SubagentParams = Type.Object({
   agent: Type.Optional(
     Type.String({
       description: "Name of the agent to invoke (for single mode)",
@@ -847,6 +915,14 @@ const SubagentParams = Type.Object({
   ),
   task: Type.Optional(
     Type.String({ description: "Task to delegate (for single mode)" }),
+  ),
+  model: Type.Optional(
+    Type.String({ description: "Model override for single mode" }),
+  ),
+  thinking: Type.Optional(
+    StringEnum(THINKING_LEVEL_VALUES, {
+      description: "Thinking override for single mode",
+    }),
   ),
   tasks: Type.Optional(
     Type.Array(TaskItem, {
@@ -1074,6 +1150,7 @@ export default function (pi: ExtensionAPI) {
             step.agent,
             taskWithContext,
             step.cwd,
+            { model: step.model, thinking: step.thinking },
             i + 1,
             signal,
             chainUpdate,
@@ -1177,6 +1254,7 @@ export default function (pi: ExtensionAPI) {
               t.agent,
               t.task,
               t.cwd,
+              { model: t.model, thinking: t.thinking },
               undefined,
               signal,
               // Per-task update callback
@@ -1287,6 +1365,7 @@ export default function (pi: ExtensionAPI) {
                 stage.agent,
                 task,
                 stage.cwd,
+                { model: stage.model, thinking: stage.thinking },
                 s + 1,
                 signal,
                 (partial) => {
@@ -1345,6 +1424,7 @@ export default function (pi: ExtensionAPI) {
           params.agent,
           params.task,
           params.cwd,
+          { model: params.model, thinking: params.thinking },
           undefined,
           signal,
           onUpdate,

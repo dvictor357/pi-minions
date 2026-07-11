@@ -9,7 +9,10 @@ import {
   CodebaseParams,
   loadQuestAgentModels,
   recordSpawnError,
+  resolveAgentRuntime,
+  SubagentParams,
 } from "./index.js";
+import type { AgentConfig } from "./agents.js";
 
 class FakeProcess extends EventEmitter {
   readonly signals: NodeJS.Signals[] = [];
@@ -123,6 +126,32 @@ describe("loadQuestAgentModels (pi-suite contract bridge)", () => {
     expect(loadQuestAgentModels(cwd).worker?.model).toBe("claude-opus-4-8");
   });
 
+  it("reads the optional thinking level approved by quest", () => {
+    writeMemory({
+      contractVersion: 2,
+      agentModels: {
+        worker: { model: "gpt-5.6-sol", thinkingLevel: "medium" },
+      },
+    });
+
+    expect(loadQuestAgentModels(cwd).worker).toMatchObject({
+      model: "gpt-5.6-sol",
+      thinkingLevel: "medium",
+    });
+    expect(
+      resolveAgentRuntime(
+        {
+          name: "worker",
+          description: "worker",
+          systemPrompt: "work",
+          source: "bundled",
+          filePath: "/tmp/worker.md",
+        },
+        cwd,
+      ),
+    ).toEqual({ model: "gpt-5.6-sol", thinking: "medium" });
+  });
+
   it("reads agentModels from contract v1 (backward-compatible)", () => {
     writeMemory({
       contractVersion: 1,
@@ -142,6 +171,66 @@ describe("loadQuestAgentModels (pi-suite contract bridge)", () => {
   it("returns {} when agentModels is absent or malformed", () => {
     writeMemory({ name: "demo", agentModels: "not-an-object" });
     expect(loadQuestAgentModels(cwd)).toEqual({});
+  });
+
+  it("drops malformed role choices and invalid thinking levels", () => {
+    writeMemory({
+      agentModels: {
+        worker: { model: "  ", thinkingLevel: "medium" },
+        scout: { model: "fast-model", thinkingLevel: "extreme" },
+        planner: "not-an-object",
+      },
+    });
+
+    expect(loadQuestAgentModels(cwd)).toEqual({
+      scout: { model: "fast-model" },
+    });
+  });
+});
+
+describe("resolveAgentRuntime", () => {
+  const worker: AgentConfig = {
+    name: "worker",
+    description: "worker",
+    systemPrompt: "work",
+    source: "bundled",
+    filePath: "/tmp/worker.md",
+  };
+
+  it("gives per-invocation model and thinking overrides highest precedence", () => {
+    expect(
+      resolveAgentRuntime(worker, "/tmp/no-quest-memory", {
+        model: "gpt-5.6-sol",
+        thinking: "medium",
+      }),
+    ).toEqual({ model: "gpt-5.6-sol", thinking: "medium" });
+  });
+
+  it("ignores an invalid per-invocation thinking override", () => {
+    expect(
+      resolveAgentRuntime(worker, "/tmp/no-quest-memory", {
+        thinking: "extreme",
+      }).thinking,
+    ).toBeUndefined();
+  });
+
+  it("falls back after an invalid invocation thinking override", () => {
+    expect(
+      resolveAgentRuntime(
+        { ...worker, thinking: "low" },
+        "/tmp/no-quest-memory",
+        { thinking: "extreme" },
+      ).thinking,
+    ).toBe("low");
+  });
+});
+
+describe("SubagentParams", () => {
+  it("accepts per-invocation model and thinking overrides in single mode", () => {
+    const schema = JSON.parse(JSON.stringify(SubagentParams));
+
+    expect(schema.properties.model.type).toBe("string");
+    expect(schema.properties.thinking).toBeDefined();
   });
 });
 

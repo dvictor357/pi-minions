@@ -118,16 +118,26 @@ Change models in one place — all agents using that tier update automatically.
 
 When resolving which model an agent runs with:
 
-1. **Explicit `model:`** in the agent's frontmatter
-2. **pi-quest role model** — a per-role model the user approved inside a [pi-suite](https://github.com/dvictor357/pi-suite) quest (`quest_assign_model`), read from the shared project memory at `~/.pi/agent/memory/projects/<cwdHash>.json`
-3. **Tier mapping** in `settings.json`
-4. **Unset** — the spawned `pi` inherits its own default
+1. **Per-invocation override** — `subagent(..., model="…")`
+2. **Explicit `model:`** in the agent's frontmatter
+3. **pi-quest role model** — a per-role model approved by `quest_assign_model`, read from shared project memory
+4. **Tier mapping** in `settings.json`
+5. **Unset** — the spawned `pi` inherits its own default
+
+Thinking uses the same routing idea: per-invocation `thinking` → explicit agent
+frontmatter → pi-quest role `thinkingLevel` → tier mapping → pi default. Invalid persisted
+thinking values are ignored. The valid values are `off`, `minimal`, `low`, `medium`,
+`high`, and `xhigh`.
 
 ## Works with pi-suite / pi-quest
 
-pi-minions is the `subagent` tool that [pi-suite](https://github.com/dvictor357/pi-suite)'s **pi-quest** orchestrator expects. Quest never registers its own `subagent` tool — its planning and verification steps call `subagent(agent="scout")`, `subagent(agent="planner")`, `subagent(agent="verifier")`, etc. The bundled agents (`scout`, `planner`, `worker`, `quick-worker`, `reviewer`, `verifier`) cover every role quest's built-in teams reference, so the two install side-by-side with no setup.
+pi-minions is the `subagent` tool that [pi-suite](https://github.com/dvictor357/pi-suite)'s **pi-quest** orchestrator expects. Quest's normal unsandboxed execution calls `subagent(agent="scout")`, `subagent(agent="worker", model="gpt-5.6-sol", thinking="medium")`, and similar handoffs. The bundled agents (`scout`, `planner`, `worker`, `quick-worker`, `reviewer`, `verifier`) cover every role quest's built-in teams reference, so the two install side-by-side with no setup.
 
-Per-role models a user approves in a quest are honored here too — see **Model precedence** above. The lookup is read-only and contract-versioned: with no pi-suite installed (or no quest run), the file is simply absent and pi-minions falls back to tier routing.
+Per-role models and thinking levels approved in a quest are honored here too — see
+**Model precedence** above. The lookup is read-only and contract-versioned: with no
+pi-suite installed (or no quest run), the file is simply absent and pi-minions falls back
+to tier routing. Quest keeps restricted/isolated steps on its guarded legacy delegate
+until pi-minions can enforce Quest sandbox policy inside the child process.
 
 ## License
 
