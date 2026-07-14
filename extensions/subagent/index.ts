@@ -46,6 +46,16 @@ const DEFAULT_AGENT_TIMEOUT_MS = 3 * 60 * 1000;
 const KILL_GRACE_MS = 5000;
 const COLLAPSED_ITEM_COUNT = 10;
 const PER_TASK_OUTPUT_CAP = 50 * 1024;
+const HEARTBEAT_MS = 2000;
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const rem = sec % 60;
+  return `${min}m${rem}s`;
+}
 
 function formatTokens(count: number): string {
   if (count < 1000) return count.toString();
@@ -180,7 +190,7 @@ interface UsageStats {
   turns: number;
 }
 
-interface SingleResult {
+export interface SingleResult {
   agent: string;
   agentSource: "user" | "project" | "bundled" | "unknown";
   task: string;
@@ -195,13 +205,39 @@ interface SingleResult {
   step?: number;
 }
 
-interface SubagentDetails {
+type SubagentPhase =
+  | "queued"
+  | "starting"
+  | "running"
+  | "tool_call"
+  | "retrying"
+  | "completed"
+  | "failed"
+  | "aborted";
+
+interface SubagentProgress {
+  runId: string;
+  phase: SubagentPhase;
+  activity: string;
+  agent: string;
+  step?: number;
+  attempt: number;
+  maxAttempts: number;
+  elapsedMs: number;
+  currentTool?: string;
+  currentPath?: string;
+}
+
+export interface SubagentDetails {
   mode: "single" | "parallel" | "chain" | "pipeline";
   agentScope: AgentScope;
   projectAgentsDir: string | null;
   bundledAgentsDir: string | null;
   results: SingleResult[];
+  progress?: SubagentProgress;
 }
+
+export type { SubagentProgress };
 
 function getFinalOutput(messages: Message[]): string {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -266,6 +302,216 @@ function getDisplayItems(messages: Message[]): DisplayItem[] {
     }
   }
   return items;
+}
+
+function safePath(p: unknown): string | undefined {
+  if (typeof p !== "string" || !p) return undefined;
+  const home = os.homedir();
+  const shortened = p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+  return shortened;
+}
+
+export function buildToolActivity(
+  name: string,
+  args: Record<string, unknown>,
+): { activity: string; currentTool: string; currentPath?: string } {
+  const currentTool = name;
+  switch (name) {
+    case "bash":
+      return { activity: "running command", currentTool };
+    case "read": {
+      const p = safePath(args.path ?? args.file_path);
+      return {
+        activity: `reading ${p ?? "file"}`,
+        currentTool,
+        currentPath: p,
+      };
+    }
+    case "write": {
+      const p = safePath(args.path ?? args.file_path);
+      return {
+        activity: `writing ${p ?? "file"}`,
+        currentTool,
+        currentPath: p,
+      };
+    }
+    case "edit": {
+      const p = safePath(args.path ?? args.file_path);
+      return {
+        activity: `editing ${p ?? "file"}`,
+        currentTool,
+        currentPath: p,
+      };
+    }
+    case "ls": {
+      const p = safePath(args.path);
+      return {
+        activity: `listing ${p ?? "directory"}`,
+        currentTool,
+        currentPath: p,
+      };
+    }
+    case "find":
+    case "fffind": {
+      const p = safePath(args.path);
+      return {
+        activity: `finding in ${p ?? "directory"}`,
+        currentTool,
+        currentPath: p,
+      };
+    }
+    case "grep":
+    case "ffgrep": {
+      const p = safePath(args.path);
+      return {
+        activity: `searching in ${p ?? "directory"}`,
+        currentTool,
+        currentPath: p,
+      };
+    }
+    default:
+      return { activity: `${name}`, currentTool };
+  }
+}
+
+export function buildProgressPayload(options: {
+  runId: string;
+  phase: SubagentPhase;
+  agent: string;
+  attempt: number;
+  maxAttempts: number;
+  startTime: number;
+  step?: number;
+  activity?: string;
+  currentTool?: string;
+  currentPath?: string;
+}): SubagentProgress {
+  return {
+    runId: options.runId,
+    phase: options.phase,
+    activity: options.activity || `${options.phase}...`,
+    agent: options.agent,
+    step: options.step,
+    attempt: options.attempt,
+    maxAttempts: options.maxAttempts,
+    elapsedMs: Date.now() - options.startTime,
+    currentTool: options.currentTool,
+    currentPath: options.currentPath,
+  };
+}
+
+const READ_ONLY_AGENTS = new Set(["scout", "planner", "reviewer", "verifier"]);
+
+interface ClaimParticipant {
+  agent: string;
+  cwd?: string;
+  readClaim?: string[];
+  writeClaim?: string[];
+  /** Participants in the same sequential group cannot overlap in time. */
+  sequentialGroup?: number;
+  label: string;
+}
+
+function canonicalPath(raw: string, cwd: string): string {
+  if (!raw.trim()) throw new Error("claim paths must not be empty");
+  const absolute = path.resolve(cwd, raw);
+  let ancestor = absolute;
+  while (!fs.existsSync(ancestor) && path.dirname(ancestor) !== ancestor) {
+    ancestor = path.dirname(ancestor);
+  }
+  let resolved = absolute;
+  try {
+    resolved = path.resolve(
+      fs.realpathSync(ancestor),
+      path.relative(ancestor, absolute),
+    );
+  } catch {
+    // The lexical path is still checked against cwd below.
+  }
+  const rel = path.relative(cwd, resolved);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(
+      `claim path ${JSON.stringify(raw)} escapes working directory ${cwd}`,
+    );
+  }
+  return resolved;
+}
+
+function pathsOverlap(a: string, b: string): boolean {
+  const rel = path.relative(a, b);
+  const reverse = path.relative(b, a);
+  return (
+    rel === "" ||
+    (!rel.startsWith("..") && !path.isAbsolute(rel)) ||
+    (!reverse.startsWith("..") && !path.isAbsolute(reverse))
+  );
+}
+
+/** Validate all processes that may run concurrently before spawning any child. */
+export function validateConcurrentWriteClaims(
+  defaultCwd: string,
+  participants: ClaimParticipant[],
+): string | null {
+  try {
+    const normalized = participants.map((participant) => {
+      const cwd = fs.existsSync(participant.cwd ?? defaultCwd)
+        ? fs.realpathSync(participant.cwd ?? defaultCwd)
+        : path.resolve(participant.cwd ?? defaultCwd);
+      const read = [
+        ...new Set(
+          (participant.readClaim ?? []).map((p) => canonicalPath(p, cwd)),
+        ),
+      ];
+      const write = [
+        ...new Set(
+          (participant.writeClaim ?? []).map((p) => canonicalPath(p, cwd)),
+        ),
+      ];
+      if (
+        READ_ONLY_AGENTS.has(participant.agent.trim().toLowerCase()) &&
+        write.length > 0
+      ) {
+        throw new Error(
+          `${participant.label} uses read-only agent "${participant.agent}" and cannot declare writeClaim`,
+        );
+      }
+      return { ...participant, cwd, read, write };
+    });
+
+    for (let i = 0; i < normalized.length; i++) {
+      const a = normalized[i];
+      if (READ_ONLY_AGENTS.has(a.agent.trim().toLowerCase())) continue;
+      for (let j = i + 1; j < normalized.length; j++) {
+        const b = normalized[j];
+        if (
+          READ_ONLY_AGENTS.has(b.agent.trim().toLowerCase()) ||
+          (a.sequentialGroup !== undefined &&
+            a.sequentialGroup === b.sequentialGroup)
+        ) {
+          continue;
+        }
+        if (a.cwd !== b.cwd && (a.write.length === 0 || b.write.length === 0))
+          continue;
+        if (a.write.length === 0 || b.write.length === 0) {
+          throw new Error(
+            `${a.label} and ${b.label} may write concurrently in ${a.cwd}; declare non-empty disjoint writeClaim arrays or run them in isolated cwd directories`,
+          );
+        }
+        for (const left of a.write) {
+          for (const right of b.write) {
+            if (pathsOverlap(left, right)) {
+              throw new Error(
+                `${a.label} and ${b.label} have overlapping write claims: ${left} ↔ ${right}; use disjoint paths or isolated cwd directories`,
+              );
+            }
+          }
+        }
+      }
+    }
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 async function mapWithConcurrencyLimit<TIn, TOut>(
@@ -527,7 +773,7 @@ export function resolveAgentRuntime(
   return { model, thinking };
 }
 
-async function runSingleAgent(
+export async function runSingleAgent(
   defaultCwd: string,
   agents: AgentConfig[],
   agentName: string,
@@ -539,6 +785,10 @@ async function runSingleAgent(
   onUpdate: OnUpdateCallback | undefined,
   makeDetails: (results: SingleResult[]) => SubagentDetails,
   timeoutMs: number,
+  attempt = 0,
+  maxAttempts = 1,
+  providedRunId?: string,
+  spawnImpl: typeof spawn = spawn,
 ): Promise<SingleResult> {
   const agent = agents.find((a) => a.name === agentName);
 
@@ -563,6 +813,9 @@ async function runSingleAgent(
       step,
     };
   }
+
+  const runId = providedRunId ?? crypto.randomUUID();
+  const startTime = Date.now();
 
   // Resolve model + thinking from the agent's tier (settings.json) or explicit
   // frontmatter. Without --thinking, subagents inherit the global
@@ -612,6 +865,47 @@ async function runSingleAgent(
     }
   };
 
+  let lastActivityTime = startTime;
+
+  const emitProgress = (
+    phase: SubagentPhase,
+    activity?: string,
+    currentTool?: string,
+    currentPath?: string,
+  ) => {
+    lastActivityTime = Date.now();
+    if (!onUpdate) return;
+    onUpdate({
+      content: [
+        {
+          type: "text",
+          text: activity || `${agentName}: ${phase}`,
+        },
+      ],
+      details: {
+        ...makeDetails([currentResult]),
+        progress: buildProgressPayload({
+          runId,
+          phase,
+          agent: agentName,
+          attempt,
+          maxAttempts,
+          startTime,
+          step,
+          activity,
+          currentTool,
+          currentPath,
+        }),
+      },
+    });
+  };
+
+  // Emit "queued" so the caller sees an immediate status.
+  // On retry attempts we skip this to avoid "queued → retrying → queued".
+  if (attempt === 0) {
+    emitProgress("queued", `${agentName} queued`);
+  }
+
   try {
     if (agent.systemPrompt.trim()) {
       const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
@@ -624,8 +918,12 @@ async function runSingleAgent(
     let wasAborted = false;
 
     const exitCode = await new Promise<number>((resolve) => {
+      emitProgress(
+        "starting",
+        `Starting ${agentName}${attempt > 0 ? ` (attempt ${attempt + 1}/${maxAttempts})` : ""}…`,
+      );
       const invocation = getPiInvocation(args);
-      const proc = spawn(invocation.command, invocation.args, {
+      const proc = spawnImpl(invocation.command, invocation.args, {
         cwd: cwd ?? defaultCwd,
         shell: false,
         detached: process.platform !== "win32",
@@ -638,18 +936,28 @@ async function runSingleAgent(
       let forcedExitCode: number | null = null;
       let killTimer: ReturnType<typeof setTimeout> | null = null;
       let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+      let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+      let abortHandler: (() => void) | null = null;
 
       const clearTimers = () => {
         if (killTimer) clearTimeout(killTimer);
         if (timeoutTimer) clearTimeout(timeoutTimer);
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
         killTimer = null;
         timeoutTimer = null;
+        heartbeatTimer = null;
       };
 
       const finish = (code: number) => {
         if (settled) return;
         settled = true;
         clearTimers();
+        proc.stdout.off("data", onStdoutData);
+        proc.stderr.off("data", onStderrData);
+        proc.off("close", onClose);
+        proc.off("error", onProcError);
+        if (signal && abortHandler)
+          signal.removeEventListener("abort", abortHandler);
         resolve(code);
       };
 
@@ -715,37 +1023,65 @@ async function runSingleAgent(
               currentResult.model = msg.model;
             if (msg.stopReason) currentResult.stopReason = msg.stopReason;
             if (msg.errorMessage) currentResult.errorMessage = msg.errorMessage;
+
+            const toolCallPart = msg.content.find((p) => p.type === "toolCall");
+            if (toolCallPart) {
+              const { activity, currentTool, currentPath } = buildToolActivity(
+                toolCallPart.name,
+                toolCallPart.arguments,
+              );
+              emitProgress("tool_call", activity, currentTool, currentPath);
+            } else {
+              emitProgress("running", `${agentName} running…`);
+            }
           }
           emitUpdate();
         }
 
         if (event.type === "tool_result_end" && event.message) {
           currentResult.messages.push(event.message as Message);
+          emitProgress("running", `${agentName} running…`);
           emitUpdate();
         }
       };
 
-      proc.stdout.on("data", (data) => {
+      const onStdoutData = (data: Buffer) => {
         buffer += data.toString();
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
         for (const line of lines) processLine(line);
-      });
+      };
 
-      proc.stderr.on("data", (data) => {
+      const onStderrData = (data: Buffer) => {
         currentResult.stderr += data.toString();
-      });
+      };
 
-      proc.on("close", (code) => {
+      const onClose = (code: number | null) => {
         closed = true;
         if (buffer.trim()) processLine(buffer);
         finish(code ?? forcedExitCode ?? 0);
-      });
+      };
 
-      proc.on("error", (err) => {
+      const onProcError = (err: Error) => {
         recordSpawnError(err, currentResult);
         finish(1);
-      });
+      };
+
+      proc.stdout.on("data", onStdoutData);
+      proc.stderr.on("data", onStderrData);
+      proc.on("close", onClose);
+      proc.on("error", onProcError);
+
+      heartbeatTimer = setInterval(() => {
+        const silent = Date.now() - lastActivityTime;
+        if (silent >= HEARTBEAT_MS) {
+          emitProgress(
+            "running",
+            `${agentName} running… (${formatDuration(Date.now() - startTime)})`,
+          );
+        }
+      }, HEARTBEAT_MS);
+      heartbeatTimer.unref?.();
 
       if (timeoutMs > 0) {
         timeoutTimer = setTimeout(() => {
@@ -759,19 +1095,25 @@ async function runSingleAgent(
           wasAborted = true;
           terminate("Subagent was aborted");
         } else {
-          signal.addEventListener(
-            "abort",
-            () => {
-              wasAborted = true;
-              terminate("Subagent was aborted");
-            },
-            { once: true },
-          );
+          abortHandler = () => {
+            wasAborted = true;
+            terminate("Subagent was aborted");
+          };
+          signal.addEventListener("abort", abortHandler, { once: true });
         }
       }
     });
 
     currentResult.exitCode = exitCode;
+    const terminalPhase: SubagentPhase = wasAborted
+      ? "aborted"
+      : exitCode === 0
+        ? "completed"
+        : "failed";
+    emitProgress(
+      terminalPhase,
+      `${agentName} ${terminalPhase} (${formatDuration(Date.now() - startTime)})`,
+    );
     if (wasAborted) throw new Error("Subagent was aborted");
     return currentResult;
   } finally {
@@ -795,7 +1137,7 @@ async function runSingleAgent(
  * stop reason) up to `retries` times. Deterministic failures (unknown agent) are
  * NOT retried. Returns the last result regardless, so callers still decide policy.
  */
-async function runAgentWithRetry(
+export async function runAgentWithRetry(
   defaultCwd: string,
   agents: AgentConfig[],
   agentName: string,
@@ -808,7 +1150,56 @@ async function runAgentWithRetry(
   makeDetails: (results: SingleResult[]) => SubagentDetails,
   retries: number,
   timeoutMs: number,
+  spawnImpl: typeof spawn = spawn,
 ): Promise<SingleResult> {
+  const runId = crypto.randomUUID();
+  const runStartTime = Date.now();
+  const maxAttempts = retries + 1;
+
+  const emitRetryProgress = (attempt: number) => {
+    if (!onUpdate) return;
+    onUpdate({
+      content: [
+        {
+          type: "text",
+          text: `Retrying ${agentName} (${attempt + 1}/${maxAttempts})...`,
+        },
+      ],
+      details: {
+        ...makeDetails([
+          {
+            agent: agentName,
+            agentSource: "unknown",
+            task,
+            exitCode: -1,
+            messages: [],
+            stderr: "",
+            usage: {
+              input: 0,
+              output: 0,
+              cacheRead: 0,
+              cacheWrite: 0,
+              cost: 0,
+              contextTokens: 0,
+              turns: 0,
+            },
+            step,
+          },
+        ]),
+        progress: buildProgressPayload({
+          runId,
+          phase: "retrying",
+          agent: agentName,
+          attempt,
+          maxAttempts,
+          startTime: runStartTime,
+          step,
+          activity: `Retrying ${agentName} (${attempt + 1}/${maxAttempts})...`,
+        }),
+      },
+    });
+  };
+
   let result = await runSingleAgent(
     defaultCwd,
     agents,
@@ -821,6 +1212,10 @@ async function runAgentWithRetry(
     onUpdate,
     makeDetails,
     timeoutMs,
+    0,
+    maxAttempts,
+    runId,
+    spawnImpl,
   );
   let attempt = 0;
   while (
@@ -831,6 +1226,7 @@ async function runAgentWithRetry(
     !signal?.aborted
   ) {
     attempt++;
+    emitRetryProgress(attempt);
     result = await runSingleAgent(
       defaultCwd,
       agents,
@@ -843,6 +1239,10 @@ async function runAgentWithRetry(
       onUpdate,
       makeDetails,
       timeoutMs,
+      attempt,
+      maxAttempts,
+      runId,
+      spawnImpl,
     );
   }
   return result;
@@ -858,6 +1258,12 @@ const TaskItem = Type.Object({
     StringEnum(THINKING_LEVEL_VALUES, {
       description: "Thinking override for this invocation",
     }),
+  ),
+  readClaim: Type.Optional(
+    Type.Array(Type.String(), { description: "Paths this task reads" }),
+  ),
+  writeClaim: Type.Optional(
+    Type.Array(Type.String(), { description: "Paths this task writes" }),
   ),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for the agent process" }),
@@ -876,6 +1282,16 @@ const PipelineStage = Type.Object({
   thinking: Type.Optional(
     StringEnum(THINKING_LEVEL_VALUES, {
       description: "Thinking override for this stage",
+    }),
+  ),
+  readClaim: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Paths this stage reads; {item} is expanded",
+    }),
+  ),
+  writeClaim: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Paths this stage writes; {item} is expanded",
     }),
   ),
   cwd: Type.Optional(
@@ -1138,7 +1554,10 @@ export default function (pi: ExtensionAPI) {
                   const allResults = [...results, currentResult];
                   onUpdate({
                     content: partial.content,
-                    details: makeDetails("chain")(allResults),
+                    details: {
+                      ...makeDetails("chain")(allResults),
+                      progress: partial.details?.progress,
+                    },
                   });
                 }
               }
@@ -1193,6 +1612,23 @@ export default function (pi: ExtensionAPI) {
       }
 
       if (params.tasks && params.tasks.length > 0) {
+        const claimError = validateConcurrentWriteClaims(
+          ctx.cwd,
+          params.tasks.map((task, index) => ({
+            ...task,
+            label: `parallel task #${index + 1} (${task.agent})`,
+            sequentialGroup: index,
+          })),
+        );
+        if (claimError)
+          return {
+            content: [
+              { type: "text", text: `Write ownership rejected: ${claimError}` },
+            ],
+            details: makeDetails("parallel")([]),
+            isError: true,
+          };
+
         if (params.tasks.length > MAX_PARALLEL_TASKS)
           return {
             content: [
@@ -1228,6 +1664,8 @@ export default function (pi: ExtensionAPI) {
           };
         }
 
+        let lastProgress: SubagentProgress | undefined;
+
         const emitParallelUpdate = () => {
           if (onUpdate) {
             const running = allResults.filter((r) => r.exitCode === -1).length;
@@ -1239,7 +1677,10 @@ export default function (pi: ExtensionAPI) {
                   text: `Parallel: ${done}/${allResults.length} done, ${running} running...`,
                 },
               ],
-              details: makeDetails("parallel")([...allResults]),
+              details: {
+                ...makeDetails("parallel")([...allResults]),
+                progress: lastProgress,
+              },
             });
           }
         };
@@ -1261,6 +1702,7 @@ export default function (pi: ExtensionAPI) {
               (partial) => {
                 if (partial.details?.results[0]) {
                   allResults[index] = partial.details.results[0];
+                  lastProgress = partial.details?.progress;
                   emitParallelUpdate();
                 }
               },
@@ -1296,6 +1738,31 @@ export default function (pi: ExtensionAPI) {
       if (hasPipeline && params.items && params.stages) {
         const items = params.items;
         const stages = params.stages;
+        const claimError = validateConcurrentWriteClaims(
+          ctx.cwd,
+          items.flatMap((item, itemIndex) =>
+            stages.map((stage, stageIndex) => ({
+              ...stage,
+              readClaim: stage.readClaim?.map((claim) =>
+                claim.replace(/\{item\}/g, item),
+              ),
+              writeClaim: stage.writeClaim?.map((claim) =>
+                claim.replace(/\{item\}/g, item),
+              ),
+              label: `pipeline item #${itemIndex + 1}, stage #${stageIndex + 1} (${stage.agent})`,
+              sequentialGroup: itemIndex,
+            })),
+          ),
+        );
+        if (claimError)
+          return {
+            content: [
+              { type: "text", text: `Write ownership rejected: ${claimError}` },
+            ],
+            details: makeDetails("pipeline")([]),
+            isError: true,
+          };
+
         if (items.length > MAX_PIPELINE_ITEMS)
           return {
             content: [
@@ -1330,6 +1797,8 @@ export default function (pi: ExtensionAPI) {
           };
         }
 
+        let lastPipelineProgress: SubagentProgress | undefined;
+
         const emitPipelineUpdate = () => {
           if (!onUpdate) return;
           const done = allResults.filter((r) => r.exitCode !== -1).length;
@@ -1341,7 +1810,10 @@ export default function (pi: ExtensionAPI) {
                 text: `Pipeline: ${done}/${items.length} done, ${running} running...`,
               },
             ],
-            details: makeDetails("pipeline")([...allResults]),
+            details: {
+              ...makeDetails("pipeline")([...allResults]),
+              progress: lastPipelineProgress,
+            },
           });
         };
 
@@ -1371,6 +1843,7 @@ export default function (pi: ExtensionAPI) {
                 (partial) => {
                   if (partial.details?.results[0]) {
                     allResults[idx] = partial.details.results[0];
+                    lastPipelineProgress = partial.details?.progress;
                     emitPipelineUpdate();
                   }
                 },

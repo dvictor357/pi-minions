@@ -19,6 +19,8 @@ pi install git:github.com/dvictor357/pi-minions
 | **Chain**    | Sequential steps. Each step sees the previous output via `{previous}`. `{ chain: [...] }`                                        |
 | **Pipeline** | Items flow through stages independently — item B can be in stage 1 while item A is in stage 3. `{ items: [...], stages: [...] }` |
 
+Parallel writer tasks must declare non-empty, disjoint `writeClaim` path arrays or use separate `cwd` directories. Pipeline writer stages follow the same rule and may use `{item}` in `readClaim`/`writeClaim`. `scout`, `planner`, `reviewer`, and `verifier` are read-only and cannot declare writes. Single and sequential calls remain unchanged.
+
 ## Codebase Intelligence
 
 A built-in `codebase` tool scans your repo, builds a dependency graph, and answers architecture questions. No native dependencies — regex parsers, Node built-ins, and a JSON sidecar cache.
